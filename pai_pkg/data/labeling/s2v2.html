@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>拍黄瓜 刀阶段 v4: A灵活循环刀 + F最后一刀 + RETURN</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; margin: 0; background: #16181d; color: #e8eaed; display: flex; height: 100vh; }
+  #sidebar { width: 170px; background: #1e2127; overflow-y: auto; padding: 8px; flex-shrink: 0; }
+  #epList { list-style: none; padding: 0; margin: 0; }
+  #epList li { padding: 5px 6px; cursor: pointer; border-radius: 4px; font-size: 12.5px; }
+  #epList li:hover { background: #2a2e37; }
+  #epList li.active { background: #3b82f6; }
+  #epList li.done::after { content: " ✓"; color: #4ade80; }
+  #main { flex: 1; display: flex; flex-direction: column; padding: 10px; gap: 6px; min-width: 0; }
+  #imgWrap { background: #000; flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; overflow: hidden; }
+  #frameImg { width: 100%; height: 100%; object-fit: contain; }
+  #info { display: flex; gap: 10px; font-size: 14px; align-items: center; flex-wrap: wrap; }
+  #info b { color: #60a5fa; font-size: 16px; }
+  button { background: #2563eb; color: #fff; border: 0; border-radius: 5px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  #playBtn { background: #16a34a; width: 100px; font-size: 15px; }
+  #seekWrap { background:#1e2127; border-radius:8px; padding:6px 12px; display:flex; align-items:center; gap:10px; }
+  #seekBar { flex:1; height:26px; accent-color:#3b82f6; }
+  #timelineWrap { background: #1e2127; border-radius: 8px; padding: 8px 12px; }
+  #timeline { position: relative; height: 40px; background: #2a2e37; border-radius: 6px; user-select: none; }
+  .seg { position: absolute; top: 3px; bottom: 3px; opacity: 0.85; font-size: 10px; color:#fff; overflow:hidden; white-space:nowrap; display:flex; align-items:center; padding-left:3px; border-radius:3px; }
+  .boundary { position:absolute; top:0; bottom:0; width:7px; cursor:ew-resize; z-index:5; background:rgba(255,255,255,0.9); border:1px solid #000; border-radius:2px; }
+  .boundary.final { background:#ffd166; }
+  .boundary.ret { background:#c084fc; }
+  #annList { max-height: 96px; overflow-y: auto; background: #1e2127; border-radius: 6px; padding: 6px; font-size: 11.5px; }
+  #help { color: #9aa3af; font-size: 12px; }
+  #status { color: #4ade80; font-size: 13px; }
+  #boundHint { color: #fbbf24; font-weight: bold; }
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h3 style="font-size:13px">Episodes</h3>
+  <ul id="epList"></ul>
+</div>
+<div id="main">
+  <div id="info">
+    <button id="playBtn">▶ 播放</button>
+    <span>EP <b id="epNo">-</b></span>
+    <span>刀阶段帧 <b id="fCur">0</b>/<b id="fDur">-</b></span>
+    <span>秒 <b id="tCur">0.0</b>/<b id="tDur">-</b></span>
+    <span id="boundHint">A=循环刀 | F=最后一刀 | R=RETURN结束</span>
+    <button id="saveBtn">💾 保存</button>
+    <span id="status"></span>
+  </div>
+  <div id="imgWrap"><img id="frameImg" alt="frame"></div>
+  <div id="seekWrap"><input type="range" id="seekBar" min="0" max="1" value="0" step="1"></div>
+  <div id="timelineWrap"><div id="timeline"></div></div>
+  <div id="annList"></div>
+  <div id="help">
+    <b style="color:#4ade80">刀阶段切分:</b>
+    <b style="color:#4ade80">A</b> = 闭合一个<b>循环刀</b>(下切+抬起+左移到下一位置) — <b>灵活, 按几刀打几次</b> |
+    <b style="color:#fbbf24">F</b> = 闭合<b>最后一刀</b>(下切+抬起完成) — 每集必按 |
+    <b style="color:#c084fc">R</b> = RETURN(刀放回原位) 结束帧 — 可不按, 默认到末尾<br>
+    RETURN(紫) 永远显示在最后。←/→ 逐帧 | P 播放/暂停 | Backspace 撤销 | 白线可拖微调 | 空格保存跳下一集
+  </div>
+</div>
+<script>
+let eps = [], curEp = null, phase = null;
+let cutBnds = [];   // A键: 各循环刀结束帧 (升序, 不限次数)
+let finalB = null;  // F键: 最后一刀(下切+抬起)结束帧
+let retB = null;    // R键: RETURN 结束帧 (null = 范围末尾)
+let curF = 0, playing = false, playTimer = null;
+const FPS = 30;
+const img = document.getElementById('frameImg');
+const tl = document.getElementById('timeline');
+
+const SEG_DEFS = [
+  { sid: 'K2_CUT_1', color: '#e74c3c', short: 'CUT1', kind: 'cut', prompt: 'make the first cut through the cucumber, lift the knife, and move it to the next cutting position' },
+  { sid: 'K3_CUT_2', color: '#e67e22', short: 'CUT2', kind: 'cut', prompt: 'make the second cut through the cucumber, lift the knife, and move it to the next cutting position' },
+  { sid: 'K4_CUT_3', color: '#f1c40f', short: 'CUT3', kind: 'cut', prompt: 'make the third cut through the cucumber, lift the knife, and move it to the next cutting position' },
+  { sid: 'K5_CUT_4', color: '#4ade80', short: 'CUT4', kind: 'cut', prompt: 'make the fourth cut through the cucumber, lift the knife, and move it to the next cutting position' },
+  { sid: 'K6_CUT_5', color: '#f472b6', short: 'CUT5', kind: 'cut', prompt: 'make the fifth cut through the cucumber, lift the knife, and move it to the next cutting position' },
+  { sid: 'K7_CUT_6', color: '#2dd4bf', short: 'CUT6', kind: 'cut', prompt: 'make the sixth cut through the cucumber, lift the knife, and move it to the next cutting position' },
+  { sid: 'K8_FINAL_CUT', color: '#06b6d4', short: 'FINAL', kind: 'final', prompt: 'make the final cut through the cucumber and lift the knife' },
+  { sid: 'K9_RETURN_KNIFE', color: '#9b59b6', short: 'RET', kind: 'ret', prompt: 'return the knife to its original position' },
+];
+const defOf = sid => SEG_DEFS.find(x => x.sid === sid);
+
+async function j(url, opt) { const r = await fetch(url, opt); return r.json(); }
+function fmt(t) { return t.toFixed(2); }
+const f2s = f => f / FPS;
+function segStart() { return phase ? phase.start_frame : 0; }
+function segEnd() { return phase ? phase.end_frame : 0; }
+function segLen() { return phase ? phase.end_frame - phase.start_frame + 1 : 1; }
+
+function showFrame() {
+  img.src = '/api/frame?ep=' + curEp.ep + '&f=' + curF + '&t=' + Date.now();
+  document.getElementById('fCur').textContent = curF - segStart();
+  document.getElementById('tCur').textContent = fmt(f2s(curF));
+  document.getElementById('seekBar').value = curF;
+}
+function setPlay(on) {
+  playing = on;
+  document.getElementById('playBtn').textContent = on ? '⏸ 暂停' : '▶ 播放';
+  if (on) { playTimer = setInterval(() => { if (curF >= segEnd()) { setPlay(false); return; } curF++; showFrame(); }, 1000/FPS); }
+  else if (playTimer) { clearInterval(playTimer); playTimer = null; }
+}
+
+function buildSegs() {
+  const a = segStart(), b = segEnd();
+  const bs = cutBnds.slice().sort((x, y) => x - y);
+  const segs = [];
+  let prev = a;
+  const nCycle = Math.min(6, bs.length);
+  for (let i = 0; i < nCycle; i++) {
+    segs.push({ skill_id: SEG_DEFS[i].sid, prompt: SEG_DEFS[i].prompt,
+                start_frame: prev, end_frame: bs[i], start: f2s(prev), end: f2s(bs[i]) });
+    prev = bs[i];
+  }
+  if (finalB !== null) {
+    segs.push({ skill_id: 'K8_FINAL_CUT', prompt: SEG_DEFS[6].prompt,
+                start_frame: prev, end_frame: finalB, start: f2s(prev), end: f2s(finalB) });
+    prev = finalB;
+  }
+  const rEnd = retB !== null ? retB : b;
+  segs.push({ skill_id: 'K9_RETURN_KNIFE', prompt: SEG_DEFS[7].prompt,
+              start_frame: prev, end_frame: rEnd, start: f2s(prev), end: f2s(rEnd) });
+  return segs;
+}
+
+function renderAll() {
+  const segs = buildSegs();
+  tl.innerHTML = '';
+  segs.forEach((a, i) => {
+    const def = defOf(a.skill_id);
+    const d = document.createElement('div');
+    d.className = 'seg';
+    d.style.background = def.color;
+    d.style.left = ((a.start_frame - segStart()) / segLen() * tl.clientWidth) + 'px';
+    d.style.width = Math.max(3, ((a.end_frame - a.start_frame) / segLen() * tl.clientWidth)) + 'px';
+    d.textContent = (i + 1) + '.' + def.short;
+    tl.appendChild(d);
+  });
+  // 边界线: 白=循环刀, 黄=最后一刀(F), 紫=RETURN(R)
+  cutBnds.slice().sort((x, y) => x - y).forEach((bf) => {
+    const line = document.createElement('div');
+    line.className = 'boundary';
+    line.style.left = (((bf - segStart()) / segLen() * tl.clientWidth) - 3) + 'px';
+    line.dataset.b = bf;
+    line.dataset.kind = 'cut';
+    tl.appendChild(line);
+  });
+  [finalB, retB].forEach((bf, k) => {
+    if (bf === null) return;
+    const line = document.createElement('div');
+    line.className = 'boundary ' + (k === 0 ? 'final' : 'ret');
+    line.style.left = (((bf - segStart()) / segLen() * tl.clientWidth) - 3) + 'px';
+    line.dataset.b = bf;
+    line.dataset.kind = k === 0 ? 'final' : 'ret';
+    tl.appendChild(line);
+  });
+  const box = document.getElementById('annList');
+  box.innerHTML = segs.map((a, i) =>
+    '<div style="padding:1px 4px;border-bottom:1px solid #2a2e37"><b style="color:' + defOf(a.skill_id).color + '">' + (i + 1) + '. ' + a.skill_id + '</b> 帧' + a.start_frame + '→' + a.end_frame + ' (' + ((a.end_frame - a.start_frame) / FPS).toFixed(2) + 's)</div>').join('');
+  document.getElementById('boundHint').textContent =
+    '循环刀x' + cutBnds.length + (finalB !== null ? ' | FINAL@' + finalB : '') + (retB !== null ? ' | RET@' + retB : '');
+}
+
+function markA() {
+  if (!phase) return;
+  const f = curF;
+  cutBnds.push(f);
+  cutBnds.sort((x, y) => x - y);
+  document.getElementById('status').textContent = '✓ 循环刀 #' + cutBnds.length + ' 结束 = 帧' + f;
+  renderAll();
+}
+function markF() {
+  if (!phase) return;
+  finalB = curF;
+  document.getElementById('status').textContent = '✓ 最后一刀(下切+抬起)结束 = 帧' + curF;
+  renderAll();
+}
+function markR() {
+  if (!phase) return;
+  retB = curF;
+  document.getElementById('status').textContent = '✓ RETURN(刀放回原位)结束 = 帧' + curF;
+  renderAll();
+}
+function undo() {
+  if (retB !== null) { retB = null; }
+  else if (finalB !== null) { finalB = null; }
+  else if (cutBnds.length) { cutBnds.pop(); }
+  renderAll();
+  document.getElementById('status').textContent = '已撤销最后一条边界';
+}
+
+async function init() {
+  eps = await j('/api/episodes');
+  const list = document.getElementById('epList');
+  const st = await j('/api/status_s2v2');
+  for (const e of eps) {
+    const li = document.createElement('li');
+    li.textContent = 'ep' + String(e.ep).padStart(3, '0') + ' (' + e.dur_s.toFixed(1) + 's)';
+    if (st.per_ep && st.per_ep[e.ep]) li.classList.add('done');
+    li.onclick = () => loadEp(e);
+    list.appendChild(li);
+  }
+  document.getElementById('playBtn').onclick = () => setPlay(!playing);
+  document.getElementById('saveBtn').onclick = save;
+  const sb = document.getElementById('seekBar');
+  sb.addEventListener('input', () => { curF = parseInt(sb.value); setPlay(false); showFrame(); });
+  loadEp(eps[0]);
+}
+
+async function loadEp(e) {
+  setPlay(false);
+  curEp = e;
+  phase = await j('/api/s2segment?ep=' + e.ep);
+  const saved = await j('/api/labels_s2v2?ep=' + e.ep);
+  cutBnds = []; finalB = null; retB = null;
+  if (saved.length) {
+    for (const sg of saved) {
+      const sid = sg.skill_id;
+      if (sid.startsWith('K8')) {
+        finalB = sg.end_frame;
+      } else if (sid.startsWith('K9')) {
+        if (sg.end_frame < segEnd()) retB = sg.end_frame;
+      } else if (sid.startsWith('K')) {
+        cutBnds.push(sg.end_frame);
+      }
+    }
+    cutBnds.sort((x, y) => x - y);
+  }
+  curF = segStart();
+  document.getElementById('epNo').textContent = e.ep;
+  document.getElementById('fDur').textContent = segLen() - 1;
+  document.getElementById('tDur').textContent = fmt(f2s(segEnd()));
+  document.getElementById('seekBar').min = segStart();
+  document.getElementById('seekBar').max = segEnd();
+  showFrame(); renderAll();
+}
+
+async function save() {
+  const segs = buildSegs();
+  if (!segs.length) return;
+  if (finalB === null) {
+    document.getElementById('status').textContent = '⚠ 还没按 F 标记最后一刀, 不能保存';
+    return;
+  }
+  const r = await fetch('/api/labels_s2v2?ep=' + curEp.ep, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(segs)
+  });
+  const res = await r.json();
+  document.getElementById('status').textContent = '✓ 已保存 ep' + curEp.ep + ' (' + res.n + ' 段)';
+  const idx = eps.indexOf(curEp);
+  const li = document.querySelectorAll('#epList li')[idx];
+  if (li) li.classList.add('done');
+  if (idx < eps.length - 1) { loadEp(eps[idx + 1]); document.getElementById('status').textContent += ' → 下一集'; }
+  else document.getElementById('status').textContent += ' → 最后一集';
+}
+
+// 白线拖动微调
+let dragB = null, dragKind = null;
+tl.addEventListener('mousedown', ev => {
+  const bEl = ev.target.closest('.boundary');
+  if (bEl) { dragB = parseInt(bEl.dataset.b); dragKind = bEl.dataset.kind || 'cut'; ev.stopPropagation(); }
+});
+window.addEventListener('mousemove', ev => {
+  if (dragB === null) return;
+  const rect = tl.getBoundingClientRect();
+  const f = Math.round(Math.max(segStart() + 1, Math.min(segEnd() - 1, segStart() + (ev.clientX - rect.left) / rect.width * segLen())));
+  if (dragKind === 'final') finalB = f;
+  else if (dragKind === 'ret') retB = f;
+  else {
+    const idx = cutBnds.indexOf(dragB);
+    if (idx >= 0) cutBnds[idx] = f;
+    cutBnds.sort((x, y) => x - y);
+  }
+  curF = f; showFrame();
+  renderAll();
+});
+window.addEventListener('mouseup', () => { dragB = null; });
+
+document.addEventListener('keydown', ev => {
+  const k = ev.key;
+  document.getElementById('seekBar').blur();  // 防止空格触发滑块
+  if (k === 'ArrowLeft') { setPlay(false); curF = Math.max(segStart(), curF - 1); showFrame(); ev.preventDefault(); }
+  else if (k === 'ArrowRight') { setPlay(false); curF = Math.min(segEnd(), curF + 1); showFrame(); ev.preventDefault(); }
+  else if (k === ' ') { ev.preventDefault(); save(); }
+  else if (k === 'a' || k === 'A') { ev.preventDefault(); markA(); }
+  else if (k === 'f' || k === 'F') { ev.preventDefault(); markF(); }
+  else if (k === 'r' || k === 'R') { ev.preventDefault(); markR(); }
+  else if (k === 'p' || k === 'P') { setPlay(!playing); }
+  else if (k === 'Backspace') { ev.preventDefault(); undo(); }
+  else if (k === 'Enter') { save(); }
+});
+
+init();
+</script>
+</body>
+</html>
